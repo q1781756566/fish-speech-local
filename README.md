@@ -49,6 +49,10 @@
 > **Legal Disclaimer**  
 > We do not hold any responsibility for any illegal usage of the codebase. Please refer to your local laws about DMCA and other related laws.
 
+> [!NOTE]
+> **Fork Modifications**
+> This fork includes changes for Windows compatibility and lower VRAM usage (meta device loading, adjustable `--max-seq-len`, UTF-8 fix, rewritten notebook). See [MODIFICATIONS.md](MODIFICATIONS.md) for details.
+
 ## Quick Start
 
 ### For Human
