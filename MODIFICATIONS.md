@@ -2,7 +2,7 @@
 
 ## 概述
 
-对 [fish-speech](https://github.com/fishaudio/fish-speech) 原仓库的 S2-Pro 推理流程做了一系列改动，目标是让模型在 **Windows + 消费级显卡（16-24 GB VRAM）** 上更易使用。
+为方便个人本地使用，对 [fish-speech](https://github.com/fishaudio/fish-speech) 原仓库的 S2-Pro 推理流程做了一系列改动，目标是让模型在 **Windows + 消费级显卡（16-24 GB VRAM）** 上更易使用。
 
 主要改进：
 - Meta device 零内存初始化，降低模型加载峰值显存
@@ -16,6 +16,50 @@
 |------|----------|
 | `fish_speech/models/text2semantic/inference.py` | meta device 加载、`--max-seq-len` CLI 参数、buffer 重建、Windows UTF-8 |
 | `inference.ipynb` | 完全重写：调用封装好的 `init_model()`，`tts()` 辅助函数，三种模式示例 |
+| `run_tts.py` | **新增** 全流程推理脚本，一条命令完成加载→生成→解码→保存 |
+
+---
+
+## 推理流程
+
+```
+输入文本 + (可选) 参考音频
+        │
+        ▼
+┌─────────────────────────────────────────┐
+│ 1. 加载 LLM (init_model)               │
+│    meta device 创建 → 加载权重到 GPU    │
+│    → 重建 buffer → 初始化 KV cache      │
+├──────���──────────────────────────────────┤
+│ 2. 加载 Codec (load_codec_model)        │
+│    DAC VQ 模型，用于音频编解码          │
+├─────────────────────────────────────────┤
+│ 3. (可选) 编码参考音频 (encode_audio)   │
+│    WAV/MP3 → resample → VQ codes        │
+│    输出: (num_codebooks, T) 整数张量    │
+├─────────────────────────────────────────┤
+│ 4. 构建 Conversation                    │
+│    system: "convert text to speech"     │
+│         + 参考音频 VQ codes (如有)      │
+│    user:  待合成文本                    │
+│    assistant: <|voice|> (待生成)        │
+├─────────────────────────────────────────┤
+│ 5. 自回归生成 (generate_long)           │
+│    文本按 speaker 分 turn → 分 batch    │
+│    每 batch: encode → prefill → decode  │
+│    输出: semantic token codes           │
+├─────────────────────────────────────────┤
+│ 6. 解码为音频 (decode_to_audio)         │
+│    VQ codes → Codec → 波形             │
+├─────────────────────────────────────────┤
+│ 7. 保存 WAV                             │
+└─────────────────────────────────────────┘
+```
+
+关键数据流：
+- **文本 → LLM → semantic codes**：`(num_codebooks+1, T)` 整数张量，第 0 行是主 codebook（语义），1-10 行是 fast codebooks（声学细节）
+- **semantic codes → Codec → 波形**：`(T_audio,)` float32，采样率由 codec 决定
+- **参考音频 → Codec encode → VQ codes**：作为 prompt 注入 system message，引导 LLM 生成相似音色
 
 ---
 
@@ -95,8 +139,9 @@ model.register_buffer("causal_mask",
 
 ```python
 os.environ["PYTHONUTF8"] = "1"
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 ```
 
 ---
@@ -143,27 +188,63 @@ tts(text, seed=42, temperature=0.7, top_p=0.9, top_k=30,
 
 ## 使用方法
 
-### CLI
+### `run_tts.py`（推荐）
+
+全流程脚本，一条命令完成 加载 → 生成 → 解码 → 保存：
 
 ```bash
-# 基本用法（默认 max_seq_len）
-python -m fish_speech.models.text2semantic.inference \
-    --checkpoint-path checkpoints/s2-pro \
-    --text "<|speaker:0|>你好，世界" \
-    --output output.wav
+# 随机音色
+python run_tts.py --text "<|speaker:0|>你好，世界"
 
-# 降低显存：限制 KV cache 到 16384
+# 降低显存（16GB 显卡）
+python run_tts.py --text "<|speaker:0|>你好" --max-seq-len 16384
+
+# Voice clone
+python run_tts.py \
+    --text "<|speaker:0|>要合成的文本" \
+    --ref-audio reference.wav \
+    --ref-text "参考音频对应的文本"
+
+# 多说话人 + 情感
+python run_tts.py --text "<|speaker:0|>你好\n<|speaker:1|>[happy]太棒了！"
+
+# 从文件读取长文本
+python run_tts.py --text-file novel_chapter.txt --ref-audio ref.wav --ref-text "参考文本"
+```
+
+完整参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--text` | — | 待合成文本（与 `--text-file` 二选一） |
+| `--text-file` | — | 从文件读取文本 |
+| `--ref-audio` | — | 参考音频路径（voice clone） |
+| `--ref-text` | — | 参考音频对应文本（与 `--ref-audio` 配合） |
+| `--output` | `output.wav` | 输出文件路径 |
+| `--checkpoint` | `checkpoints/s2-pro` | 模型路径 |
+| `--max-seq-len` | `0` (= 32768) | KV cache 大小，减小省显存 |
+| `--temperature` | `0.7` | 采样温度 |
+| `--top-p` | `0.9` | nucleus sampling |
+| `--top-k` | `30` | top-k sampling |
+| `--seed` | `42` | 随机种子 |
+| `--chunk-length` | `300` | 长文本分 batch 字节阈值 |
+
+### 底层 CLI（`inference.py`）
+
+功能更完整但参数更多，适合高级用法：
+
+```bash
 python -m fish_speech.models.text2semantic.inference \
     --checkpoint-path checkpoints/s2-pro \
     --text "<|speaker:0|>你好，世界" \
     --max-seq-len 16384 \
     --output output.wav
 
-# Voice clone：指定参考音频
+# Voice clone（用 --prompt-audio）
 python -m fish_speech.models.text2semantic.inference \
     --checkpoint-path checkpoints/s2-pro \
     --text "<|speaker:0|>要合成的文本" \
-    --prompt-text "参考音频对应的文本" \
+    --prompt-text "参考音频对应文本" \
     --prompt-audio reference.wav \
     --output output.wav
 ```
