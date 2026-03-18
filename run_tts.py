@@ -47,7 +47,7 @@ def parse_args():
     p.add_argument("--ref-audio", type=str, default=None, help="参考音频路径（用于 voice clone）")
     p.add_argument("--ref-text", type=str, default=None, help="参考音频对应的文本")
     # 输出
-    p.add_argument("--output", type=str, default="output.wav", help="输出 WAV 路径 (default: output.wav)")
+    p.add_argument("--output", type=str, default=None, help="输出 WAV 路径 (default: output/<stem>.wav 或 output/<N>.wav)")
     # 模型
     p.add_argument("--checkpoint", type=str, default="checkpoints/s2-pro", help="模型路径")
     p.add_argument("--device", type=str, default="cuda", help="设备 (default: cuda)")
@@ -64,7 +64,25 @@ def parse_args():
     if args.text is None and args.text_file is None:
         p.error("必须指定 --text 或 --text-file")
     if args.ref_audio and not args.ref_text:
-        p.error("--ref-audio 需要同时指定 --ref-text")
+        ref_txt = Path(args.ref_audio).with_suffix(".txt")
+        if ref_txt.exists():
+            args.ref_text = ref_txt.read_text(encoding="utf-8").strip()
+            logger.info(f"自动读取参考文本: {ref_txt}")
+        else:
+            args.ref_text = ""
+
+    if args.output is None:
+        out_dir = Path("output")
+        if args.text_file:
+            args.output = str(out_dir / (Path(args.text_file).stem + ".wav"))
+        else:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            existing = {p.stem for p in out_dir.glob("*.wav") if p.stem.isdigit()}
+            idx = 1
+            while str(idx) in existing:
+                idx += 1
+            args.output = str(out_dir / f"{idx}.wav")
+
     return args
 
 
